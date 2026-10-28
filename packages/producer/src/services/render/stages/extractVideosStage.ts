@@ -44,6 +44,7 @@ import {
   detectTransfer,
   extractAllVideoFrames,
   extractMediaMetadata,
+  fingerprintElementId,
   isVideoPastTimelineEnd,
   isHdrColorSpace,
   rebaseVideoToWindow,
@@ -69,6 +70,7 @@ import { rendersSdrOnly } from "../hdrMode.js";
 import {
   compareExtractionFailureGroups,
   extractionFailureGroupIdentityKey,
+  type ExtractionFailureGroup,
   type ExtractionFailureMetadataV1,
 } from "../extractionFailureMetadata.js";
 
@@ -129,6 +131,38 @@ export interface VideoExtractionStageFailureSummary {
   count: number;
 }
 
+function extractionFailureGroupDiagnostic(group: ExtractionFailureGroup): string {
+  return [
+    group.kind,
+    group.elementFingerprint ? `element=${group.elementFingerprint}` : undefined,
+    group.sourceFingerprint ? `source=${group.sourceFingerprint}` : undefined,
+    group.host ? `host=${group.host}` : undefined,
+    group.status !== undefined
+      ? `status=${group.status}`
+      : group.statusClass
+        ? `status=${group.statusClass}`
+        : undefined,
+    group.retry ? `retry=${group.retry.used}/${group.retry.budget}` : undefined,
+  ]
+    .filter((value) => value !== undefined)
+    .join(" ");
+}
+
+function extractionFailureDiagnostic(metadata: ExtractionFailureMetadataV1): string {
+  const contextualGroups = metadata.groups.filter(
+    (group) =>
+      group.elementFingerprint !== undefined ||
+      group.sourceFingerprint !== undefined ||
+      group.host !== undefined ||
+      group.status !== undefined ||
+      group.statusClass !== undefined ||
+      group.retry !== undefined,
+  );
+  if (contextualGroups.length === 0) return "";
+  const omitted = metadata.omittedGroupCount > 0 ? `; +${metadata.omittedGroupCount} omitted` : "";
+  return `; context: ${contextualGroups.map(extractionFailureGroupDiagnostic).join("; ")}${omitted}`;
+}
+
 const MAX_EXTRACTION_FAILURE_GROUPS = 8;
 
 interface ExtractionFailureAggregateInput extends VideoExtractionFailureGroupDetails {
@@ -173,6 +207,7 @@ function extractionFailureMetadataFromResult(
     result.errors.map((failure) => ({
       kind: failure.kind ?? "internal",
       affectedElementCount: 1,
+      elementFingerprint: fingerprintElementId(failure.videoId),
       ...failure.group,
     })),
   );
@@ -238,7 +273,10 @@ export class VideoExtractionStageError extends Error {
     const total = failures.reduce((sum, failure) => sum + failure.count, 0);
     const breakdown = failures.map((failure) => `${failure.kind}=${failure.count}`).join(",");
     const reason = ffmpegReason ? `: ffmpeg said: ${ffmpegReason}` : "";
-    super(`Video extraction failed for ${total} source(s) [${code}; ${breakdown}]${reason}`);
+    const context = extractionFailureDiagnostic(extractionFailure);
+    super(
+      `Video extraction failed for ${total} source(s) [${code}; ${breakdown}]${reason}${context}`,
+    );
     this.name = "VideoExtractionStageError";
     this.publicMetadata = { extractionFailure };
   }

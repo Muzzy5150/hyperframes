@@ -8,7 +8,8 @@ import type {
   VideoElement,
   VideoExtractionFailure,
 } from "@hyperframes/engine";
-import { resolveProjectRelativeSrc } from "@hyperframes/engine";
+import { fingerprintElementId, resolveProjectRelativeSrc } from "@hyperframes/engine";
+import { extractSafeRenderErrorMetadata } from "../../../server.js";
 import {
   appendAutoDetectedVideoAudio,
   assertVideoExtractionSucceeded,
@@ -378,6 +379,110 @@ describe("assertVideoExtractionSucceeded", () => {
     );
   });
 
+  it("keeps the owning element identifiable in the final safe diagnostic", () => {
+    const elementId = "hero-video";
+    const result = extractionResult([
+      {
+        videoId: elementId,
+        kind: "source_rejected",
+        retryable: false,
+        group: {
+          sourceFingerprint: `sha256:${"a".repeat(64)}`,
+          host: "media.customer-cdn.example",
+          status: 403,
+          statusClass: "http_4xx",
+          retry: { phase: "download", used: 0, budget: 1 },
+        },
+        error:
+          "HTTP 403 for https://media.customer-cdn.example/private/clip.mp4?signature=must-not-leak",
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      assertVideoExtractionSucceeded(result);
+    } catch (error) {
+      caught = error;
+    }
+
+    if (!(caught instanceof Error)) throw new Error("expected extraction error");
+    const serialized = JSON.stringify({
+      error: caught.message,
+      ...extractSafeRenderErrorMetadata(caught),
+    });
+    expect(serialized).toContain(fingerprintElementId(elementId));
+    expect(serialized).toContain('"status":403');
+    expect(caught.message).toContain("status=403");
+    expect(serialized).not.toContain(elementId);
+    expect(serialized).not.toContain("must-not-leak");
+  });
+
+  it("attributes a missing local source without exposing its path", () => {
+    const elementId = "missing-local-video";
+    let caught: unknown;
+    try {
+      assertVideoExtractionSucceeded(
+        extractionResult([
+          {
+            videoId: elementId,
+            kind: "source_missing",
+            retryable: false,
+            error: "Video file not found: /private/customer/assets/missing.mp4",
+          },
+        ]),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    if (!(caught instanceof VideoExtractionStageError)) {
+      throw new Error("expected VideoExtractionStageError");
+    }
+    expect(caught.extractionFailure.groups).toEqual([
+      {
+        kind: "source_missing",
+        affectedElementCount: 1,
+        elementFingerprint: fingerprintElementId(elementId),
+      },
+    ]);
+    expect(caught.message).toContain(`element=${fingerprintElementId(elementId)}`);
+    expect(caught.message).not.toContain("/private/");
+    expect(caught.message).not.toContain(elementId);
+  });
+
+  it("deduplicates repeated failures for the same element and source", () => {
+    const failure: VideoExtractionFailure = {
+      videoId: "repeated-video",
+      kind: "download_not_found",
+      retryable: false,
+      group: {
+        sourceFingerprint: `sha256:${"b".repeat(64)}`,
+        host: "media.customer-cdn.example",
+        status: 404,
+        statusClass: "http_4xx",
+        retry: { phase: "download", used: 0, budget: 1 },
+      },
+      error: "HTTP 404",
+    };
+
+    let caught: unknown;
+    try {
+      assertVideoExtractionSucceeded(extractionResult([failure, failure]));
+    } catch (error) {
+      caught = error;
+    }
+
+    if (!(caught instanceof VideoExtractionStageError)) {
+      throw new Error("expected VideoExtractionStageError");
+    }
+    expect(caught.extractionFailure.groups).toHaveLength(1);
+    expect(caught.extractionFailure.groups[0]).toMatchObject({
+      affectedElementCount: 2,
+      elementFingerprint: fingerprintElementId("repeated-video"),
+      status: 404,
+    });
+  });
+
   it("attaches bounded, deterministic v1 groups while keeping kind counts exhaustive", () => {
     const errors: VideoExtractionFailure[] = Array.from({ length: 9 }, (_, index) => ({
       videoId: `private-${index}`,
@@ -421,7 +526,7 @@ describe("assertVideoExtractionSucceeded", () => {
       { kind: "invalid_media", affectedElementCount: 2 },
     ]);
     expect(caught.extractionFailure.groups).toHaveLength(8);
-    expect(caught.extractionFailure.omittedGroupCount).toBe(2);
+    expect(caught.extractionFailure.omittedGroupCount).toBe(3);
     expect(caught.extractionFailure.groups.map((group) => group.sourceFingerprint)).toEqual(
       Array.from({ length: 8 }, (_, index) => `sha256:${index.toString(16).padStart(64, "0")}`),
     );

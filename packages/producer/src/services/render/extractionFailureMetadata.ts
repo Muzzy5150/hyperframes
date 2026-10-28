@@ -13,7 +13,9 @@ export interface ExtractionFailureGroup {
   kind: VideoExtractionFailureKind;
   affectedElementCount: number;
   sourceFingerprint?: string;
+  elementFingerprint?: string;
   host?: string;
+  status?: number;
   statusClass?: VideoExtractionFailureStatusClass;
   retry?: VideoExtractionFailureRetry;
 }
@@ -29,6 +31,8 @@ type ExtractionFailureGroupSortTuple = readonly [
   string,
   string,
   string,
+  string,
+  number,
   string,
   string,
   number,
@@ -52,7 +56,9 @@ function extractionFailureGroupSortTuple(
   return [
     group.kind,
     stringOrEmpty(group.sourceFingerprint),
+    stringOrEmpty(group.elementFingerprint),
     stringOrEmpty(group.host),
+    group.status ?? -1,
     stringOrEmpty(group.statusClass),
     retry[0],
     retry[1],

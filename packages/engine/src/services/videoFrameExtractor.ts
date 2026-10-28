@@ -442,6 +442,7 @@ export interface VideoExtractionFailureRetry {
 export interface VideoExtractionFailureGroupDetails {
   sourceFingerprint?: string;
   host?: string;
+  status?: number;
   statusClass?: VideoExtractionFailureStatusClass;
   retry?: VideoExtractionFailureRetry;
 }
@@ -478,10 +479,19 @@ function downloadFailureGroup(
 ): VideoExtractionFailureGroupDetails {
   const sourceIdentity = safeVideoExtractionSourceIdentity(source);
   const failureHost = error.telemetry?.finalHost ?? error.telemetry?.initialHost;
+  const rawStatus = error.status ?? error.telemetry?.status;
+  const status =
+    typeof rawStatus === "number" &&
+    Number.isInteger(rawStatus) &&
+    rawStatus >= 100 &&
+    rawStatus <= 599
+      ? rawStatus
+      : undefined;
   const attempt = error.telemetry?.attempt;
   return {
     ...(sourceIdentity ? { sourceFingerprint: sourceIdentity.sourceFingerprint } : {}),
     ...((failureHost ?? sourceIdentity?.host) ? { host: failureHost ?? sourceIdentity?.host } : {}),
+    ...(status !== undefined ? { status } : {}),
     statusClass: downloadStatusClass(error),
     retry: {
       phase: "download",

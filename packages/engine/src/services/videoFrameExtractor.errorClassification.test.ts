@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,19 @@ function extractionOutputDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "hf-extraction-failure-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function remoteVideo(source: string, id = "hero-video") {
+  return {
+    id,
+    src: source,
+    start: 0,
+    end: 0.1,
+    mediaStart: 0,
+    playbackRate: 1,
+    loop: false,
+    hasAudio: false,
+  };
 }
 
 describe("classifyFfmpegSpawnError", () => {
@@ -88,6 +101,7 @@ describe("extractAllVideoFrames download failure metadata", () => {
     expect(result.errors[0]?.group).toEqual({
       sourceFingerprint: `sha256:${safeDownloadUrlIdentity(source).urlFingerprint}`,
       host: "media.customer-cdn.example",
+      status: 200,
       statusClass: "other",
       retry: { phase: "download", used: 0, budget: 1 },
     });
@@ -126,5 +140,104 @@ describe("extractAllVideoFrames download failure metadata", () => {
         retry: { phase: "download", used: 1, budget: 1 },
       },
     });
+  });
+
+  it.each([
+    [403, "source_rejected", false],
+    [404, "download_not_found", false],
+  ] as const)(
+    "preserves HTTP %i in the terminal acquisition diagnostic",
+    async (status, kind, retryable) => {
+      const source =
+        "https://media.customer-cdn.example/private/clip.mp4?X-Amz-Signature=must-not-leak";
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status })));
+
+      const result = await extractAllVideoFrames([remoteVideo(source)], extractionOutputDir(), {
+        fps: 30,
+        outputDir: extractionOutputDir(),
+      });
+
+      expect(result.errors[0]).toMatchObject({
+        videoId: "hero-video",
+        kind,
+        retryable,
+        group: {
+          status,
+          statusClass: "http_4xx",
+        },
+      });
+      expect(JSON.stringify(result.errors[0]?.group)).not.toContain("must-not-leak");
+    },
+  );
+
+  it("preserves a typed timeout as retryable terminal acquisition context", async () => {
+    const source =
+      "https://media.customer-cdn.example/private/clip.mp4?X-Amz-Signature=must-not-leak";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new UrlDownloadError("timeout", true, "Download timed out")),
+    );
+
+    const result = await extractAllVideoFrames([remoteVideo(source)], extractionOutputDir(), {
+      fps: 30,
+      outputDir: extractionOutputDir(),
+    });
+
+    expect(result.errors[0]).toMatchObject({
+      videoId: "hero-video",
+      kind: "download_transient",
+      retryable: true,
+      group: {
+        statusClass: "timeout",
+        retry: { phase: "download", used: 1, budget: 1 },
+      },
+    });
+    expect(JSON.stringify(result.errors[0]?.group)).not.toContain("must-not-leak");
+  });
+
+  it("identifies a missing local source without inventing download metadata", async () => {
+    const result = await extractAllVideoFrames(
+      [remoteVideo("assets/does-not-exist.mp4")],
+      extractionOutputDir(),
+      { fps: 30, outputDir: extractionOutputDir() },
+    );
+
+    expect(result.errors[0]).toMatchObject({
+      videoId: "hero-video",
+      kind: "source_missing",
+      retryable: false,
+    });
+    expect(result.errors[0]?.group).toBeUndefined();
+  });
+
+  it("does not create an acquisition diagnostic for a successful remote source", async () => {
+    const source =
+      "https://media.customer-cdn.example/private/clip.mp4?X-Amz-Signature=must-not-leak";
+    const fixture = readFileSync(
+      join(
+        import.meta.dirname,
+        "../../../studio/tests/e2e/fixtures/design-panel-qa/assets/test.mp4",
+      ),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(fixture, {
+          status: 200,
+          headers: {
+            "content-length": String(fixture.length),
+            "content-type": "video/mp4",
+          },
+        }),
+      ),
+    );
+
+    const result = await extractAllVideoFrames([remoteVideo(source)], extractionOutputDir(), {
+      fps: 30,
+      outputDir: extractionOutputDir(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 });
